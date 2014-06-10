@@ -2,13 +2,12 @@
 #include "fvplatform.h"
 #include "fvignoredversions.h"
 #include "fvavailableupdate.h"
-#include <QApplication>
 #include <QCoreApplication>
 #include <QtNetwork>
 #include <QDebug>
 #include <QSettings>
-#include "quazip/quazip.h"
-#include "quazip/quazipfile.h"
+#include "quazip.h"
+#include "quazipfile.h"
 
 #ifdef Q_WS_MAC
 #include "CoreFoundation/CoreFoundation.h"
@@ -29,7 +28,7 @@
 #	include "fvversioncomparatortest.h"
 #endif
 
-extern QSettings* settings;
+//extern QSettings* settings;
 
 FvUpdater* FvUpdater::m_Instance = 0;
 
@@ -895,13 +894,15 @@ bool FvUpdater::getRemindLaterAllowed()
 
 void FvUpdater::decideWhatToDoWithCurrentUpdateProposal()
 {
+    InstallUpdate();
+    /*
 	QString policy = settings->value(FV_NEW_VERSION_POLICY_KEY).toString();
 	if(policy == "install")
-		InstallUpdate();
 	else if(policy == "skip")
 		SkipUpdate();
 	else
 		RemindMeLater();
+    */
 }
 
 #endif
