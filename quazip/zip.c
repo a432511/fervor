@@ -19,6 +19,7 @@
 #include "zlib.h"
 #include "zip.h"
 #include "quazip_global.h"
+#include <QIODevice>
 
 #ifdef STDC
 #  include <stddef.h>
