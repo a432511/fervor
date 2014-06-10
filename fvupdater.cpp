@@ -6,8 +6,8 @@
 #include <QtNetwork>
 #include <QDebug>
 #include <QSettings>
-#include "quazip.h"
-#include "quazipfile.h"
+#include "quazip/quazip.h"
+#include "quazip/quazipfile.h"
 
 #ifdef Q_WS_MAC
 #include "CoreFoundation/CoreFoundation.h"
