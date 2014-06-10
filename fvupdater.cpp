@@ -2,6 +2,7 @@
 #include "fvplatform.h"
 #include "fvignoredversions.h"
 #include "fvavailableupdate.h"
+#include <QApplication>
 #include <QCoreApplication>
 #include <QtNetwork>
 #include <QDebug>
