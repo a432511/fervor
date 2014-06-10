@@ -1,4 +1,21 @@
-Check out the [`autoupdate` branch](fervor/tree/autoupdate) by Torben Dannhauer too!
+This is a branch that was made by Torben Dannhauer and updated by Paulo Pinheiro to support Qt5 as well as Qt4. That promises an *autoupdate functionality* at least on Windows.
+
+According to the author, the following changes were made:
+
+* Clicking "Install Update" now installs the update automatically:
+	* downloads the update with a progress bar
+	* renames all old files with an available replacement to `<oldname>.oldversion`
+	* unzips the update files
+	* restarts the app to run the new software version – now the old binaries are no longer locked by Windows
+	* and finally during the start process of the software cleans up the renamed old files.
+	* (Windows does not allow to delete files of running apps, but renaming is allowed – thus restarting the app allows to switch to the new version and the final cleanup deletes the old files)
+* Fervor now depends on [QuaZIP](http://quazip.sourceforge.net/), a zipping framework for Qt to be able to unzip the update within the program without further _external_ dependencies like 7zip, WinRar or similar solutions.
+* Removed the dialog which presents the update for manual download – it is no longer required.
+* Removing the preprocessor definitions `FV_APP_VERSION` and `FV_APP_VERSION` – it is far more elegant to use the QApplication::set* mechanism instead the defined strings.
+* Integrate SSL-Certificate fingerprint check to ensure the update is downloaded from the right server.
+* Integrate support for Webserver-authentication do allow to protect the updates as well as the update feed with `.htaccess`
+* Integrate support for details appearance control of the update window – it should be configurable if "skip this update" and if "remind me later" is allowed.
+* Changed update window appearance: Resizing is no longer possible, also the title bar is removed. The user has now only the buttons to react on a proposed update.
 
 ----
 
@@ -57,16 +74,7 @@ Git clone Fervor:
 You might also download [a tarball](https://github.com/pypt/fervor/tarball/master).
 
 
-## 2. Include Fervor into your project
-
-You can use Fervor either in your Qt Creator project or in your CMake project.
-
-If you want to include Fervor into your Qt Creator project, read section #1 below.
-
-If you use CMake and would like to build Fervor with it instead of Qt Creator, read section #2 below.
-
-
-### 1. Include Fervor into your Qt Creator Project (`.pro` file)
+## 2. Include Fervor into your Qt Project (`.pro` file)
 
 Include Fervor's project include file `Fervor.pri` after setting your application's `TARGET` and `VERSION`:
 
@@ -85,28 +93,6 @@ Include Fervor's project include file `Fervor.pri` after setting your applicatio
 
 Fervor will append itself to your application's `HEADERS`, `SOURCES`, `FORMS` and `TRANSLATIONS`, and thus will become an integral part of your application's binary.
 
-**or**
-
-### 2. Include Fervor into your CMake Project (`CMakeLists.txt` file)
-
-In your `CMakeLists.txt` set the application name and version info, include the fervor-directory and link with it:
-
-	set(FERVOR_APP_NAME "Sample")
-	set(FERVOR_APP_VERSION "1.0")
-
-	add_subdirectory(fervor-directory)
-
-	include_directories(
-		...
-		fervor-directory
-	)
-	...
-	target_link_libraries(Sample
-		...
-		Fervor
-	)
-
-*Note:* `fervor-directory` must be a subdirectory in your source-directory.
 
 ## 3. Set your application's `applicationName`, `applicationVersion`, `organizationName` and `organizationDomain` if you haven't done so already
 
@@ -201,13 +187,3 @@ When the user clicks "Install Update", he / she is then shown a link (`<enclosur
 See [https://raw.github.com/pypt/fervor/master/sample/Appcast.xml](https://raw.github.com/pypt/fervor/master/sample/Appcast.xml) for an "appcast" example, and [http://pypt.github.com/fervor/RelNotes.html](http://pypt.github.com/fervor/RelNotes.html) for an "release notes" example.
 
 It is up to you to implement "appcasts" and "release notes". If you don't release too many versions of your application, it is even plausible to edit them by hand every time you release an update.
-
-
-# Donations
-
-Donors: Marek Pazdan. Thanks!
-
-
-# Contacts
-
-I'm Linas, my email is <shirshegsm@gmail.com>

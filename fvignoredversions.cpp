@@ -1,7 +1,7 @@
 #include "fvignoredversions.h"
 #include "fvversioncomparator.h"
 #include <QSettings>
-#include <QApplication>
+#include <QCoreApplication>
 #include <string>
 
 // QSettings key for the latest skipped version
@@ -9,7 +9,7 @@
 
 
 FVIgnoredVersions::FVIgnoredVersions(QObject *parent) :
-	QObject(parent)
+QObject(parent)
 {
 	// noop
 }
@@ -21,23 +21,17 @@ bool FVIgnoredVersions::VersionIsIgnored(QString version)
 	//	2) The version that was skipped before and thus stored in QSettings (ignore)
 	//	3) A newer version (don't ignore)
 	// 'version' is not likely to contain an older version in any case.
-
-	if (version == FV_APP_VERSION) {
+    
+	if (version == QCoreApplication::applicationVersion()) {
 		return true;
 	}
-
-#ifdef Q_WS_MAC
-	QSettings settings(QSettings::NativeFormat,
+    
+    QSettings settings(QSettings::NativeFormat,
 					   QSettings::UserScope,
-					   QApplication::organizationDomain(),
-					   QApplication::applicationName());
-#else
-	QSettings settings(QSettings::NativeFormat,
-					   QSettings::UserScope,
-					   QApplication::organizationName(),
-					   QApplication::applicationName());
-#endif
-
+					   QCoreApplication::organizationDomain(),
+					   QCoreApplication::applicationName());
+    
+	//QSettings settings;
 	if (settings.contains(FV_IGNORED_VERSIONS_LATEST_SKIPPED_VERSION_KEY)) {
 		QString lastSkippedVersion = settings.value(FV_IGNORED_VERSIONS_LATEST_SKIPPED_VERSION_KEY).toString();
 		if (version == lastSkippedVersion) {
@@ -45,42 +39,36 @@ bool FVIgnoredVersions::VersionIsIgnored(QString version)
 			return true;
 		}
 	}
-
-	std::string currentAppVersion = std::string(FV_APP_VERSION);
+    
+	std::string currentAppVersion = QCoreApplication::applicationVersion().toStdString();
 	std::string suggestedVersion = std::string(version.toStdString());
 	if (FvVersionComparator::CompareVersions(currentAppVersion, suggestedVersion) == FvVersionComparator::kAscending) {
 		// Newer version - do not skip
 		return false;
 	}
-
+    
 	// Fallback - skip
 	return true;
 }
 
 void FVIgnoredVersions::IgnoreVersion(QString version)
 {
-	if (version == FV_APP_VERSION) {
+	if (version == QCoreApplication::applicationVersion()) {
 		// Don't ignore the current version
 		return;
 	}
-
+    
 	if (version.isEmpty()) {
 		return;
 	}
-
-#ifdef Q_WS_MAC
-	QSettings settings(QSettings::NativeFormat,
+    
+    QSettings settings(QSettings::NativeFormat,
 					   QSettings::UserScope,
-					   QApplication::organizationDomain(),
-					   QApplication::applicationName());
-#else
-	QSettings settings(QSettings::NativeFormat,
-					   QSettings::UserScope,
-					   QApplication::organizationName(),
-					   QApplication::applicationName());
-#endif
+					   QCoreApplication::organizationDomain(),
+					   QCoreApplication::applicationName());
+    
 
 	settings.setValue(FV_IGNORED_VERSIONS_LATEST_SKIPPED_VERSION_KEY, version);
-
+    
 	return;
 }

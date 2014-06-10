@@ -1,31 +1,36 @@
 #include "fvupdater.h"
-#include "fvupdatewindow.h"
-#include "fvupdateconfirmdialog.h"
 #include "fvplatform.h"
 #include "fvignoredversions.h"
 #include "fvavailableupdate.h"
-#include <QApplication>
+#include <QCoreApplication>
 #include <QtNetwork>
+#include <QDebug>
+#include <QSettings>
+#include "quazip.h"
+#include "quazipfile.h"
+
+#ifdef Q_WS_MAC
+#include "CoreFoundation/CoreFoundation.h"
+#endif
+
+#ifdef FV_GUI
+#include "fvupdatewindow.h"
+#include "fvupdatedownloadprogress.h"
 #include <QMessageBox>
 #include <QDesktopServices>
-#include <QDebug>
-
-#ifndef FV_APP_NAME
-#	error "FV_APP_NAME is undefined (must have been defined by Fervor.pri)"
+#else
+// QSettings key for automatic update installation
+#define FV_NEW_VERSION_POLICY_KEY              "FVNewVersionPolicy"
 #endif
-#ifndef FV_APP_VERSION
-#	error "FV_APP_VERSION is undefined (must have been defined by Fervor.pri)"
-#endif
-
 
 #ifdef FV_DEBUG
 	// Unit tests
 #	include "fvversioncomparatortest.h"
 #endif
 
+extern QSettings* settings;
 
 FvUpdater* FvUpdater::m_Instance = 0;
-
 
 FvUpdater* FvUpdater::sharedUpdater()
 {
@@ -55,9 +60,17 @@ void FvUpdater::drop()
 FvUpdater::FvUpdater() : QObject(0)
 {
 	m_reply = 0;
+#ifdef FV_GUI
 	m_updaterWindow = 0;
-	m_updateConfirmationDialog = 0;
+#endif
 	m_proposedUpdate = 0;
+	m_requiredSslFingerprint = "";
+	htAuthUsername = "";
+	htAuthPassword = "";
+	skipVersionAllowed = true;
+	remindLaterAllowed = true;
+
+	connect(&m_qnam, SIGNAL(authenticationRequired(QNetworkReply*, QAuthenticator*)),this, SLOT(authenticationRequired(QNetworkReply*, QAuthenticator*)));
 
 	// Translation mechanism
 	installTranslator();
@@ -78,8 +91,9 @@ FvUpdater::~FvUpdater()
 		m_proposedUpdate = 0;
 	}
 
-	hideUpdateConfirmationDialog();
+#ifdef FV_GUI
 	hideUpdaterWindow();
+#endif
 }
 
 void FvUpdater::installTranslator()
@@ -87,17 +101,22 @@ void FvUpdater::installTranslator()
 	QTranslator translator;
 	QString locale = QLocale::system().name();
 	translator.load(QString("fervor_") + locale);
-    //QTextCodec::setCodecForTr(QTextCodec::codecForName("utf8"));
+
+#if QT_VERSION < 0x050000
+    QTextCodec::setCodecForTr(QTextCodec::codecForName("utf8"));
+#endif
+
 	qApp->installTranslator(&translator);
 }
 
+#ifdef FV_GUI
 void FvUpdater::showUpdaterWindowUpdatedWithCurrentUpdateProposal()
 {
 	// Destroy window if already exists
 	hideUpdaterWindow();
 
 	// Create a new window
-	m_updaterWindow = new FvUpdateWindow();
+	m_updaterWindow = new FvUpdateWindow(NULL, skipVersionAllowed, remindLaterAllowed);
 	m_updaterWindow->UpdateWindowWithCurrentProposedUpdate();
 	m_updaterWindow->show();
 }
@@ -120,38 +139,7 @@ void FvUpdater::updaterWindowWasClosed()
 	// (Re-)nullify a pointer to a destroyed QWidget or you're going to have a bad time.
 	m_updaterWindow = 0;
 }
-
-
-void FvUpdater::showUpdateConfirmationDialogUpdatedWithCurrentUpdateProposal()
-{
-	// Destroy dialog if already exists
-	hideUpdateConfirmationDialog();
-
-	// Create a new window
-	m_updateConfirmationDialog = new FvUpdateConfirmDialog();
-	m_updateConfirmationDialog->UpdateWindowWithCurrentProposedUpdate();
-	m_updateConfirmationDialog->show();
-}
-
-void FvUpdater::hideUpdateConfirmationDialog()
-{
-	if (m_updateConfirmationDialog) {
-		if (! m_updateConfirmationDialog->close()) {
-			qWarning() << "Update confirmation dialog didn't close, leaking memory from now on";
-		}
-
-		// not deleting because of Qt::WA_DeleteOnClose
-
-		m_updateConfirmationDialog = 0;
-	}
-}
-
-void FvUpdater::updateConfirmationDialogWasClosed()
-{
-	// (Re-)nullify a pointer to a destroyed QWidget or you're going to have a bad time.
-	m_updateConfirmationDialog = 0;
-}
-
+#endif
 
 void FvUpdater::SetFeedURL(QUrl feedURL)
 {
@@ -176,10 +164,217 @@ FvAvailableUpdate* FvUpdater::GetProposedUpdate()
 
 void FvUpdater::InstallUpdate()
 {
-	qDebug() << "Install update";
+	if(m_proposedUpdate==NULL)
+	{
+		qWarning() << "Abort Update: No update prososed! This should not happen.";
+		return;
+	}
 
-	showUpdateConfirmationDialogUpdatedWithCurrentUpdateProposal();
+	// Prepare download
+	QUrl url = m_proposedUpdate->GetEnclosureUrl();
+
+	// Check SSL Fingerprint if required
+	if(url.scheme()=="https" && !m_requiredSslFingerprint.isEmpty())
+		if( !checkSslFingerPrint(url) )	// check failed
+		{	
+			qWarning() << "Update aborted.";
+			return;
+		}
+
+	// Start Download
+	QNetworkReply* reply = m_qnam.get(QNetworkRequest(url));
+	connect(reply, SIGNAL(finished()), this, SLOT(httpUpdateDownloadFinished()));
+
+	// Maybe Check request 's return value
+	if (reply->error() != QNetworkReply::NoError)
+	{
+		qDebug()<<"Unable to download the update: "<<reply->errorString();
+		return;
+	}
+	else
+		qDebug()<<"OK";
+
+	// Show download Window
+#ifdef FV_GUI
+	FvUpdateDownloadProgress* dlwindow = new FvUpdateDownloadProgress(NULL);
+	connect(reply, SIGNAL(downloadProgress(qint64, qint64)), dlwindow, SLOT(downloadProgress(qint64, qint64) ));
+	connect(&m_qnam, SIGNAL(finished(QNetworkReply*)), dlwindow, SLOT(close()));
+	dlwindow->show();
+#endif
+
+	emit (updatedFinishedSuccessfully());
+
+#ifdef FV_GUI
+	hideUpdaterWindow();
+#endif
 }
+
+void FvUpdater::httpUpdateDownloadFinished()
+{
+	QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
+	if(reply==NULL)
+	{
+		qWarning()<<"The slot httpUpdateDownloadFinished() should only be invoked by S&S.";
+		return;
+	}
+
+	if(reply->error() == QNetworkReply::NoError)
+	{
+		int httpstatuscode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toUInt();
+
+		// no error received?
+		if (reply->error() == QNetworkReply::NoError)
+		{
+			if (reply->isReadable())
+			{
+#ifdef Q_WS_MAC
+                CFURLRef appURLRef = CFBundleCopyBundleURL(CFBundleGetMainBundle());
+                char path[PATH_MAX];
+                if (!CFURLGetFileSystemRepresentation(appURLRef, TRUE, (UInt8 *)path, PATH_MAX)) {
+                    // error!
+                }
+
+                CFRelease(appURLRef);
+                QString filePath = QString(path);
+                QString rootDirectory = filePath.left(filePath.lastIndexOf("/"));
+#else
+                QString rootDirectory = QCoreApplication::applicationDirPath() + "/";
+#endif
+                
+				// Write download into File
+				QFileInfo fileInfo=reply->url().path();
+				QString fileName = rootDirectory + fileInfo.fileName();
+				//qDebug()<<"Writing downloaded file into "<<fileName;
+	
+				QFile file(fileName);
+				file.open(QIODevice::WriteOnly);
+				file.write(reply->readAll());
+				file.close();
+
+				// Retrieve List of updated files (Placed in an extra scope to avoid QuaZIP handles the archive permanently and thus avoids the deletion.)
+				{	
+					QuaZip zip(fileName);
+					if (!zip.open(QuaZip::mdUnzip)) {
+						qWarning("testRead(): zip.open(): %d", zip.getZipError());
+						return;
+					}
+					zip.setFileNameCodec("IBM866");
+					QList<QuaZipFileInfo> updateFiles = zip.getFileInfoList();
+		
+					// Rename all current files with available update.
+					for (int i=0;i<updateFiles.size();i++)
+					{
+						QString sourceFilePath = rootDirectory + "\\" + updateFiles[i].name;
+						QDir appDir( QCoreApplication::applicationDirPath() );
+
+						QFileInfo file(	sourceFilePath );
+						if(file.exists())
+						{
+							//qDebug()<<tr("Moving file %1 to %2").arg(sourceFilePath).arg(sourceFilePath+".oldversion");
+							appDir.rename( sourceFilePath, sourceFilePath+".oldversion" );
+						}
+					}
+				}
+
+				// Install updated Files
+				unzipUpdate(fileName, rootDirectory);
+
+				// Delete update archive
+                while(QFile::remove(fileName) )
+                {
+                };
+
+				// Restart ap to clean up and start usual business
+				restartApplication();
+
+			}
+			else qDebug()<<"Error: QNetworkReply is not readable!";
+		}
+		else 
+		{
+			qDebug()<<"Download errors ocurred! HTTP Error Code:"<<httpstatuscode;
+		}
+
+		reply->deleteLater();
+    }	// If !reply->error END
+}	// httpUpdateDownloadFinished END
+
+bool FvUpdater::unzipUpdate(const QString & filePath, const QString & extDirPath, const QString & singleFileName )
+{
+	QuaZip zip(filePath);
+
+    if (!zip.open(QuaZip::mdUnzip)) {
+		qWarning()<<tr("Error: Unable to open zip archive %1 for unzipping: %2").arg(filePath).arg(zip.getZipError());
+		return false;
+	}
+
+	zip.setFileNameCodec("IBM866");
+
+	//qWarning("Update contains %d files\n", zip.getEntriesCount());
+
+	QuaZipFileInfo info;
+	QuaZipFile file(&zip);
+	QFile out;
+	QString name;
+	QDir appDir(extDirPath);
+	for (bool more = zip.goToFirstFile(); more; more = zip.goToNextFile())
+	{
+		if (!zip.getCurrentFileInfo(&info)) {
+			qWarning()<<tr("Error: Unable to retrieve fileInfo about the file to extract: %2").arg(zip.getZipError());
+			return false;
+		}
+
+		if (!singleFileName.isEmpty())
+			if (!info.name.contains(singleFileName))
+				continue;
+
+		if (!file.open(QIODevice::ReadOnly)) {
+			qWarning()<<tr("Error: Unable to open file %1 for unzipping: %2").arg(filePath).arg(file.getZipError());
+			return false;
+		}
+
+		name = QString("%1/%2").arg(extDirPath).arg(file.getActualFileName());
+
+		if (file.getZipError() != UNZ_OK) {
+			qWarning()<<tr("Error: Unable to retrieve zipped filename to unzip from %1: %2").arg(filePath).arg(file.getZipError());
+			return false;
+		}
+		
+		QFileInfo fi(name);
+		appDir.mkpath(fi.absolutePath() );	// Ensure that subdirectories - if required - exist 
+		out.setFileName(name);
+		out.open(QIODevice::WriteOnly);
+		out.write( file.readAll() );
+		out.close();
+
+		if (file.getZipError() != UNZ_OK) {
+			qWarning()<<tr("Error: Unable to unzip file %1: %2").arg(name).arg(file.getZipError());
+			return false;
+		}
+
+		if (!file.atEnd()) {
+			qWarning()<<tr("Error: Have read all available bytes, but pointer still does not show EOF: %1").arg(file.getZipError());
+			return false;
+		}
+
+		file.close();
+
+		if (file.getZipError() != UNZ_OK) {
+			qWarning()<<tr("Error: Unable to close zipped file %1: %2").arg(name).arg(file.getZipError());
+			return false;
+		}
+	}
+
+	zip.close();
+
+	if (zip.getZipError() != UNZ_OK) {
+		qWarning()<<tr("Error: Unable to close zip archive file %1: %2").arg(filePath).arg(file.getZipError());
+		return false;
+	}
+
+	return true;
+}
+
 
 void FvUpdater::SkipUpdate()
 {
@@ -194,46 +389,19 @@ void FvUpdater::SkipUpdate()
 	// Start ignoring this particular version
 	FVIgnoredVersions::IgnoreVersion(proposedUpdate->GetEnclosureVersion());
 
+#ifdef FV_GUI
 	hideUpdaterWindow();
-	hideUpdateConfirmationDialog();	// if any; shouldn't be shown at this point, but who knows
+#endif
 }
 
 void FvUpdater::RemindMeLater()
 {
-	qDebug() << "Remind me later";
+	//qDebug() << "Remind me later";
 
+#ifdef FV_GUI
 	hideUpdaterWindow();
-	hideUpdateConfirmationDialog();	// if any; shouldn't be shown at this point, but who knows
+#endif
 }
-
-void FvUpdater::UpdateInstallationConfirmed()
-{
-	qDebug() << "Confirm update installation";
-
-	FvAvailableUpdate* proposedUpdate = GetProposedUpdate();
-	if (! proposedUpdate) {
-		qWarning() << "Proposed update is NULL (shouldn't be at this point)";
-		return;
-	}
-
-	// Open a link
-	if (! QDesktopServices::openUrl(proposedUpdate->GetEnclosureUrl())) {
-		showErrorDialog(tr("Unable to open this link in a browser. Please do it manually."), true);
-		return;
-	}
-
-	hideUpdaterWindow();
-	hideUpdateConfirmationDialog();
-}
-
-void FvUpdater::UpdateInstallationNotConfirmed()
-{
-	qDebug() << "Do not confirm update installation";
-
-	hideUpdateConfirmationDialog();	// if any; shouldn't be shown at this point, but who knows
-	// leave the "update proposal window" inact
-}
-
 
 bool FvUpdater::CheckForUpdates(bool silentAsMuchAsItCouldGet)
 {
@@ -246,25 +414,24 @@ bool FvUpdater::CheckForUpdates(bool silentAsMuchAsItCouldGet)
 
 	// Check if application's organization name and domain are set, fail otherwise
 	// (nowhere to store QSettings to)
-	if (QApplication::organizationName().isEmpty()) {
-		qCritical() << "QApplication::organizationName is not set. Please do that.";
+	if (QCoreApplication::organizationName().isEmpty()) {
+		qCritical() << "QCoreApplication::organizationName is not set. Please do that.";
 		return false;
 	}
-	if (QApplication::organizationDomain().isEmpty()) {
-		qCritical() << "QApplication::organizationDomain is not set. Please do that.";
+	if (QCoreApplication::organizationDomain().isEmpty()) {
+		qCritical() << "QCoreApplication::organizationDomain is not set. Please do that.";
 		return false;
 	}
 
-	// Set application name / version is not set yet
-	if (QApplication::applicationName().isEmpty()) {
-		QString appName = QString::fromUtf8(FV_APP_NAME);
-		qWarning() << "QApplication::applicationName is not set, setting it to '" << appName << "'";
-		QApplication::setApplicationName(appName);
+	if(QCoreApplication::applicationName().isEmpty()) {
+		qCritical() << "QCoreApplication::applicationName is not set. Please do that.";
+		return false;
 	}
-	if (QApplication::applicationVersion().isEmpty()) {
-		QString appVersion = QString::fromUtf8(FV_APP_VERSION);
-		qWarning() << "QApplication::applicationVersion is not set, setting it to '" << appVersion << "'";
-		QApplication::setApplicationVersion(appVersion);
+
+	// Set application version is not set yet
+	if (QCoreApplication::applicationVersion().isEmpty()) {
+		qCritical() << "QCoreApplication::applicationVersion is not set. Please do that.";
+		return false;
 	}
 
 	cancelDownloadFeed();
@@ -289,12 +456,16 @@ void FvUpdater::startDownloadFeed(QUrl url)
 {
 	m_xml.clear();
 
-	QNetworkRequest request;
- 	request.setHeader(QNetworkRequest::ContentTypeHeader, "application/xml");
- 	request.setHeader(QNetworkRequest::UserAgentHeader, QApplication::applicationName());
- 	request.setUrl(url);
+	// Check SSL Fingerprint if required
+	if(url.scheme()=="https" && !m_requiredSslFingerprint.isEmpty())
+		if( !checkSslFingerPrint(url) )	// check failed
+		{	
+			qWarning() << "Update aborted.";
+			return;
+		}
 
-	m_reply = m_qnam.get(request);
+
+	m_reply = m_qnam.get(QNetworkRequest(url));
 
 	connect(m_reply, SIGNAL(readyRead()), this, SLOT(httpFeedReadyRead()));
 	connect(m_reply, SIGNAL(downloadProgress(qint64, qint64)), this, SLOT(httpFeedUpdateDataReadProgress(qint64, qint64)));
@@ -368,7 +539,7 @@ bool FvUpdater::xmlParseFeed()
 
 	QString xmlTitle, xmlLink, xmlReleaseNotesLink, xmlPubDate, xmlEnclosureUrl,
 			xmlEnclosureVersion, xmlEnclosurePlatform, xmlEnclosureType;
-	unsigned long xmlEnclosureLength = 0;
+	unsigned long xmlEnclosureLength;
 
 	// Parse
 	while (! m_xml.atEnd()) {
@@ -396,48 +567,28 @@ bool FvUpdater::xmlParseFeed()
 
 				QXmlStreamAttributes attribs = m_xml.attributes();
 
-				if (attribs.hasAttribute("fervor:platform")) {
+				if (attribs.hasAttribute("fervor:platform"))
+				{
+					xmlEnclosurePlatform = attribs.value("fervor:platform").toString().trimmed();
 
-					if (FvPlatform::CurrentlyRunningOnPlatform(attribs.value("fervor:platform").toString().trimmed())) {
-
-						xmlEnclosurePlatform = attribs.value("fervor:platform").toString().trimmed();
-
-						if (attribs.hasAttribute("url")) {
-							xmlEnclosureUrl = attribs.value("url").toString().trimmed();
-						} else {
-							xmlEnclosureUrl = "";
-						}
-
-                        // First check for Sparkle's version, then overwrite with Fervor's version (if any)
-                        if (attribs.hasAttribute("sparkle:version")) {
-                            QString candidateVersion = attribs.value("sparkle:version").toString().trimmed();
-                            if (! candidateVersion.isEmpty()) {
-                                xmlEnclosureVersion = candidateVersion;
-                            }
-                        }
-                        if (attribs.hasAttribute("fervor:version")) {
-                            QString candidateVersion = attribs.value("fervor:version").toString().trimmed();
-                            if (! candidateVersion.isEmpty()) {
-                                xmlEnclosureVersion = candidateVersion;
-                            }
-                        }
-
-						if (attribs.hasAttribute("length")) {
-							xmlEnclosureLength = attribs.value("length").toString().toLong();
-						} else {
-							xmlEnclosureLength = 0;
-						}
-						if (attribs.hasAttribute("type")) {
-							xmlEnclosureType = attribs.value("type").toString().trimmed();
-						} else {
-							xmlEnclosureType = "";
-						}
-
+					if (FvPlatform::CurrentlyRunningOnPlatform(xmlEnclosurePlatform))
+					{
+						xmlEnclosureUrl = attribs.hasAttribute("url") ? attribs.value("url").toString().trimmed() : "";
+				
+						xmlEnclosureVersion = "";
+						if (attribs.hasAttribute("fervor:version")) 
+							xmlEnclosureVersion = attribs.value("fervor:version").toString().trimmed();
+						if (attribs.hasAttribute("sparkle:version"))
+							xmlEnclosureVersion = attribs.value("sparkle:version").toString().trimmed();
+				
+						xmlEnclosureLength = attribs.hasAttribute("length") ? attribs.value("length").toString().toLong() : 0;
+		
+						xmlEnclosureType = attribs.hasAttribute("type") ? attribs.value("type").toString().trimmed() : "";
 					}
 
-				}
+				}	// if hasAttribute flevor:platform END
 
-			}
+			}	// IF encosure END
 
 		} else if (m_xml.isEndElement()) {
 
@@ -485,10 +636,6 @@ bool FvUpdater::xmlParseFeed()
 		}
 	}
 
-    // No updates were found if we're at this point
-    // (not a single <item> element found)
-    showInformationDialog(tr("No updates were found."), false);
-
 	return false;
 }
 
@@ -503,15 +650,10 @@ bool FvUpdater::searchDownloadedFeedForUpdates(QString xmlTitle,
 											   unsigned long xmlEnclosureLength,
 											   QString xmlEnclosureType)
 {
-    qDebug() << "Title:" << xmlTitle;
-    qDebug() << "Link:" << xmlLink;
-    qDebug() << "Release notes link:" << xmlReleaseNotesLink;
-    qDebug() << "Pub. date:" << xmlPubDate;
-    qDebug() << "Enclosure URL:" << xmlEnclosureUrl;
-    qDebug() << "Enclosure version:" << xmlEnclosureVersion;
-    qDebug() << "Enclosure platform:" << xmlEnclosurePlatform;
-    qDebug() << "Enclosure length:" << xmlEnclosureLength;
-    qDebug() << "Enclosure type:" << xmlEnclosureType;
+	Q_UNUSED(xmlTitle);
+	Q_UNUSED(xmlPubDate);
+	Q_UNUSED(xmlEnclosureLength);
+	Q_UNUSED(xmlEnclosureType);
 
 	// Validate
 	if (xmlReleaseNotesLink.isEmpty()) {
@@ -529,7 +671,7 @@ bool FvUpdater::searchDownloadedFeedForUpdates(QString xmlTitle,
 		return false;
 	}
 	if (xmlEnclosureUrl.isEmpty() || xmlEnclosureVersion.isEmpty() || xmlEnclosurePlatform.isEmpty()) {
-        showErrorDialog(tr("Feed error: invalid \"enclosure\" with the download link"), false);
+		showErrorDialog(tr("Feed error: invalid \"enclosure\" with the download link"), false);
 		return false;
 	}
 
@@ -561,8 +703,13 @@ bool FvUpdater::searchDownloadedFeedForUpdates(QString xmlTitle,
 	m_proposedUpdate->SetEnclosureLength(xmlEnclosureLength);
 	m_proposedUpdate->SetEnclosureType(xmlEnclosureType);
 
+#ifdef FV_GUI
 	// Show "look, there's an update" window
 	showUpdaterWindowUpdatedWithCurrentUpdateProposal();
+#else
+	// Decide ourselves what to do
+	decideWhatToDoWithCurrentUpdateProposal();
+#endif
 
 	return true;
 }
@@ -577,11 +724,15 @@ void FvUpdater::showErrorDialog(QString message, bool showEvenInSilentMode)
 		}
 	}
 
+#ifdef FV_GUI
 	QMessageBox dlFailedMsgBox;
 	dlFailedMsgBox.setIcon(QMessageBox::Critical);
 	dlFailedMsgBox.setText(tr("Error"));
 	dlFailedMsgBox.setInformativeText(message);
 	dlFailedMsgBox.exec();
+#else
+	qCritical() << message;
+#endif
 }
 
 void FvUpdater::showInformationDialog(QString message, bool showEvenInSilentMode)
@@ -593,9 +744,163 @@ void FvUpdater::showInformationDialog(QString message, bool showEvenInSilentMode
 		}
 	}
 
+#ifdef FV_GUI
 	QMessageBox dlInformationMsgBox;
 	dlInformationMsgBox.setIcon(QMessageBox::Information);
 	dlInformationMsgBox.setText(tr("Information"));
 	dlInformationMsgBox.setInformativeText(message);
 	dlInformationMsgBox.exec();
+#else
+	qDebug() << message;
+#endif
 }
+
+void FvUpdater::finishUpdate(QString pathToFinish)
+{
+	pathToFinish = pathToFinish.isEmpty() ? QCoreApplication::applicationDirPath() : pathToFinish;
+	QDir appDir(pathToFinish);
+	appDir.setFilter( QDir::Files | QDir::Dirs );
+
+	QFileInfoList dirEntries = appDir.entryInfoList();
+	foreach (QFileInfo fi, dirEntries)
+	{
+		if ( fi.isDir() )
+		{
+            QString dirname = fi.fileName();
+            if ((dirname==".") || (dirname == ".."))
+                continue;
+			
+			// recursive clean up subdirectory
+			finishUpdate(fi.filePath());
+		}
+		else
+		{
+			if(fi.suffix()=="oldversion")
+				if( !appDir.remove( fi.absoluteFilePath() ) )
+					qDebug()<<"Error: Unable to clean up file: "<<fi.absoluteFilePath();
+
+		}
+	}	// For each dir entry END
+}
+
+void FvUpdater::restartApplication()
+{
+	// Spawn a new instance of myApplication:
+    QString app = QApplication::applicationFilePath();
+    QStringList arguments = QApplication::arguments();
+    QString wd = QDir::currentPath();
+    qDebug() << app << arguments << wd;
+    QProcess::startDetached(app, arguments, wd);
+    QApplication::exit();
+}
+
+void FvUpdater::setRequiredSslFingerPrint(QString md5)
+{
+	m_requiredSslFingerprint = md5.remove(":");
+}
+
+QString FvUpdater::getRequiredSslFingerPrint()
+{
+	return m_requiredSslFingerprint;
+}
+
+bool FvUpdater::checkSslFingerPrint(QUrl urltoCheck)
+{
+	if(urltoCheck.scheme()!="https")
+	{
+		qWarning()<<tr("SSL fingerprint check: The url %1 is not a ssl connection!").arg(urltoCheck.toString());
+		return false;
+	}
+
+	QSslSocket *socket = new QSslSocket(this);
+	socket->connectToHostEncrypted(urltoCheck.host(), 443);
+	if( !socket->waitForEncrypted(1000))	// waits until ssl emits encrypted(), max 1000msecs
+	{
+		qWarning()<<"SSL fingerprint check: Unable to connect SSL server: "<<socket->sslErrors();
+		return false;
+	}
+
+	QSslCertificate cert = socket->peerCertificate();
+
+	if(cert.isNull())
+	{
+		qWarning()<<"SSL fingerprint check: Unable to retrieve SSL server certificate.";
+		return false;
+	}
+
+	// COmpare digests
+	if(cert.digest().toHex() != m_requiredSslFingerprint)
+	{
+		qWarning()<<"SSL fingerprint check: FINGERPRINT MISMATCH! Server digest="<<cert.digest().toHex()<<", requiered ssl digest="<<m_requiredSslFingerprint;
+		return false;
+	}
+	
+	return true;
+}
+
+void FvUpdater::authenticationRequired ( QNetworkReply * reply, QAuthenticator * authenticator )
+{
+	if(reply==NULL || authenticator==NULL)
+		return;
+
+	if(!authenticator->user().isEmpty())	// If there is already a login user set but an authentication is still required: credentials must be wrong -> abort
+	{
+		reply->abort();
+		qWarning()<<"Http authentication: Wrong credentials!";
+		return;
+	}
+
+	authenticator->setUser(htAuthUsername);
+	authenticator->setPassword(htAuthPassword);
+}
+
+void FvUpdater::setHtAuthCredentials(QString user, QString pass)
+{
+	htAuthUsername = user;
+	htAuthPassword = pass;
+}
+
+void FvUpdater::setHtAuthUsername(QString user)
+{
+	htAuthUsername = user;
+}
+
+void FvUpdater::setHtAuthPassword(QString pass)
+{
+	htAuthPassword = pass;
+}
+
+void FvUpdater::setSkipVersionAllowed(bool allowed)
+{
+	skipVersionAllowed = allowed;
+}
+
+void FvUpdater::setRemindLaterAllowed(bool allowed)
+{
+	remindLaterAllowed = allowed;
+}
+
+bool FvUpdater::getSkipVersionAllowed()
+{
+	return skipVersionAllowed;
+}
+
+bool FvUpdater::getRemindLaterAllowed()
+{
+	return remindLaterAllowed;
+}
+
+#ifndef FV_GUI
+
+void FvUpdater::decideWhatToDoWithCurrentUpdateProposal()
+{
+	QString policy = settings->value(FV_NEW_VERSION_POLICY_KEY).toString();
+	if(policy == "install")
+		InstallUpdate();
+	else if(policy == "skip")
+		SkipUpdate();
+	else
+		RemindMeLater();
+}
+
+#endif
